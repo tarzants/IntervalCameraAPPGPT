@@ -39,6 +39,10 @@ class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var intervalCaptureRunnable: Runnable? = null
 
+    // Pending request values to resume flow after permission grant
+    private var pendingIntervalTimeSeconds: Int? = null
+    private var pendingNumShots: Int? = null
+
 
     @SuppressLint("NewApi")
     private val requestPermissionLauncher =
@@ -53,8 +57,17 @@ class MainActivity : AppCompatActivity() {
             }
             
             if (cameraGranted && storageGranted) {
-                // Permissions granted
-                startCamera()
+                // Permissions granted: continue with the user's requested action
+                val interval = pendingIntervalTimeSeconds
+                val shots = pendingNumShots
+                if (interval != null && shots != null) {
+                    startIntervalCapture(interval, shots)
+                } else {
+                    // Fallback: ensure camera is ready
+                    startCamera()
+                }
+                pendingIntervalTimeSeconds = null
+                pendingNumShots = null
             } else {
                 // Permissions denied
                 Log.e("Permissions", "Camera or storage permission denied")
@@ -101,6 +114,9 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
 
+            // Save pending values in case we need to request permissions
+            pendingIntervalTimeSeconds = intervalTime
+            pendingNumShots = numShots
 
             val cameraPermissionGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
             val storagePermissionGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -121,6 +137,9 @@ class MainActivity : AppCompatActivity() {
                 requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
             } else {
                 startIntervalCapture(intervalTime, numShots)
+                // Clear pending since we proceeded immediately
+                pendingIntervalTimeSeconds = null
+                pendingNumShots = null
             }
         }
     }
