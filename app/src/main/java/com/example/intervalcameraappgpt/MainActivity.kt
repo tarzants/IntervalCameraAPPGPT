@@ -1,6 +1,6 @@
-package com.example.intervalcameraapp
+package com.example.intervalcameraappgpt
 
-import com.example.intervalcameraappgpt.R // Assuming this is the correct R file
+import com.example.intervalcameraappgpt.R
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -9,7 +9,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
-import android.os.Looper // Import Looper for Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.widget.Button
 import android.widget.EditText
@@ -24,6 +24,8 @@ import android.util.Log
 import androidx.annotation.RequiresApi
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import android.graphics.ImageFormat
+import android.util.Size
 
 class MainActivity : AppCompatActivity() {
 
@@ -32,21 +34,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var startButton: Button
 
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private var cameraDevice: CameraDevice? = null // Keep a reference to the CameraDevice
+    private var cameraDevice: CameraDevice? = null
     private var imageReader: ImageReader? = null
     private var cameraCaptureSession: CameraCaptureSession? = null
 
+    private var selectedCameraId: String? = null
+    private var jpegSize: Size? = null
 
     @SuppressLint("NewApi")
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-            if (permissions[Manifest.permission.CAMERA] == true &&
-                permissions[Manifest.permission.WRITE_EXTERNAL_STORAGE] == true) {
-                // 权限申请通过
+            if (permissions[Manifest.permission.CAMERA] == true) {
                 startCamera()
             } else {
-                // 权限未通过
-                Log.e("Permissions", "Camera or storage permission denied")
+                Log.e("Permissions", "Camera permission denied")
             }
         }
 
@@ -64,17 +65,14 @@ class MainActivity : AppCompatActivity() {
 
             if (intervalTimeText.isEmpty() || numShotsText.isEmpty()) {
                 Log.e("InputValidation", "Interval time or number of shots cannot be empty.")
-                // Optionally, show a Toast to the user
                 return@setOnClickListener
             }
 
             val intervalTime = intervalTimeText.toInt()
             val numShots = numShotsText.toInt()
 
-
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
-                || ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.WRITE_EXTERNAL_STORAGE))
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA))
             } else {
                 startIntervalCapture(intervalTime, numShots)
             }
@@ -84,42 +82,56 @@ class MainActivity : AppCompatActivity() {
     @RequiresApi(Build.VERSION_CODES.P)
     private fun startCamera() {
         val cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        if (ActivityCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             Log.e("Camera", "Camera permission not granted, requesting permissions.")
-            requestPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.WRITE_EXTERNAL_STORAGE))
+            requestPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA))
             return
         }
 
         try {
-            val cameraId = cameraManager.cameraIdList.firstOrNull()
+            // Prefer back camera
+            selectedCameraId = cameraManager.cameraIdList.firstOrNull { id ->
+                val characteristics = cameraManager.getCameraCharacteristics(id)
+                val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                facing == CameraCharacteristics.LENS_FACING_BACK
+            } ?: cameraManager.cameraIdList.firstOrNull()
+
+            val cameraId = selectedCameraId
             if (cameraId == null) {
                 Log.e("Camera", "No camera available.")
                 return
             }
 
-            imageReader = ImageReader.newInstance(1920, 1080, android.graphics.ImageFormat.JPEG, 1).apply {
+            // Query supported JPEG sizes and pick the best available (prefer 1920x1080 if present)
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val configMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val supportedJpegSizes = configMap?.getOutputSizes(ImageFormat.JPEG)
+
+            if (supportedJpegSizes.isNullOrEmpty()) {
+                Log.e("Camera", "No supported JPEG sizes found.")
+                return
+            }
+
+            val preferred = supportedJpegSizes.firstOrNull { it.width == 1920 && it.height == 1080 }
+            jpegSize = preferred ?: supportedJpegSizes.maxByOrNull { it.width.toLong() * it.height.toLong() }
+
+            val size = jpegSize!!
+            imageReader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, /*maxImages*/ 2).apply {
                 setOnImageAvailableListener({ reader ->
-                    // This is where you get the image after it's captured
                     val image = reader.acquireLatestImage()
-                    // Process and save the image here
                     image?.let {
                         val buffer = it.planes[0].buffer
                         val bytes = ByteArray(buffer.remaining())
                         buffer.get(bytes)
-                        saveImageToGallery(bytes) // Call a function to save the image data
+                        saveImageToGallery(bytes)
                         it.close()
                     }
-                }, Handler(Looper.getMainLooper())) // Ensure handler is on the correct looper if needed for UI updates
+                }, Handler(Looper.getMainLooper()))
             }
-
 
             cameraManager.openCamera(cameraId, cameraExecutor, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {
-                    cameraDevice = device // Store the cameraDevice instance
+                    cameraDevice = device
                     createCameraPreviewSession()
                 }
 
@@ -134,115 +146,112 @@ class MainActivity : AppCompatActivity() {
                     cameraDevice = null
                 }
             })
+        } catch (e: SecurityException) {
+            Log.e("Camera", "Security exception opening camera", e)
         } catch (e: CameraAccessException) {
             Log.e("Camera", "Failed to access camera", e)
         }
     }
 
     private fun createCameraPreviewSession() {
-        cameraDevice?.let { device ->
-            imageReader?.surface?.let { surface ->
-                try {
-                    val captureRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE) // Use TEMPLATE_STILL_CAPTURE for taking photos
-                    captureRequestBuilder.addTarget(surface)
+        val device = cameraDevice
+        val surface = imageReader?.surface
+        if (device == null || surface == null) {
+            Log.e("Camera", "Cannot create session: device or surface is null")
+            return
+        }
+        try {
+            val captureRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            captureRequestBuilder.addTarget(surface)
+            captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            captureRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
 
-                    device.createCaptureSession(listOf(surface), object : CameraCaptureSession.StateCallback() {
-                        override fun onConfigured(session: CameraCaptureSession) {
-                            cameraCaptureSession = session
-                            // Camera is configured, ready to take pictures if startIntervalCapture calls takePictureAndSave
-                            // If you need a preview, you would set up a repeating request here.
-                            // For interval capture, you might not need a continuous preview.
-                            Log.d("Camera", "Camera session configured.")
-                        }
-
-                        override fun onConfigureFailed(session: CameraCaptureSession) {
-                            Log.e("Camera", "Camera configuration failed")
-                        }
-                    }, null) // Handler can be null or a background handler
-                } catch (e: CameraAccessException) {
-                    Log.e("Camera", "Failed to create capture session", e)
+            device.createCaptureSession(listOf(surface), object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    cameraCaptureSession = session
+                    Log.d("Camera", "Camera session configured.")
                 }
-            } ?: Log.e("Camera", "ImageReader surface is null")
-        } ?: Log.e("Camera", "CameraDevice is null")
+
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    Log.e("Camera", "Camera configuration failed")
+                }
+            }, null)
+        } catch (e: CameraAccessException) {
+            Log.e("Camera", "Failed to create capture session", e)
+        }
     }
 
-
-    // Make sure these functions are INSIDE the MainActivity class
     @SuppressLint("NewApi")
     private fun startIntervalCapture(intervalTime: Int, numShots: Int) {
         if (cameraDevice == null || cameraCaptureSession == null || imageReader == null) {
             Log.e("IntervalCapture", "Camera not ready for capture. Call startCamera first.")
-            // You might want to re-initialize the camera here or show an error
-            startCamera() // Attempt to start the camera if not ready
-            // Add a delay or a callback mechanism to ensure camera is ready before proceeding
+            startCamera()
             Handler(Looper.getMainLooper()).postDelayed({
-                // Retry after a short delay, or implement a more robust state check
                 if (cameraDevice != null && cameraCaptureSession != null) {
                     proceedWithIntervalCapture(intervalTime, numShots)
                 } else {
                     Log.e("IntervalCapture", "Camera still not ready after delay.")
                 }
-            }, 2000) // 2 second delay, adjust as needed
+            }, 2000)
             return
         }
         proceedWithIntervalCapture(intervalTime, numShots)
     }
 
     private fun proceedWithIntervalCapture(intervalTime: Int, numShots: Int) {
-        val handler = Handler(Looper.getMainLooper()) // Use Looper.getMainLooper() or a background looper if preferred
-
+        val handler = Handler(Looper.getMainLooper())
         val runnable = object : Runnable {
             var shotsTaken = 0
-
             override fun run() {
                 if (shotsTaken < numShots) {
-                    takePicture() // Modified to just trigger capture
+                    takePicture()
                     shotsTaken++
-                    if (shotsTaken < numShots) { // Schedule next shot only if more are needed
+                    if (shotsTaken < numShots) {
                         handler.postDelayed(this, (intervalTime * 1000).toLong())
                     }
                 }
             }
         }
-        handler.post(runnable) // Start the first capture
+        handler.post(runnable)
     }
 
     private fun takePicture() {
-        cameraDevice?.let { device ->
-            cameraCaptureSession?.let { session ->
-                imageReader?.surface?.let { surface ->
-                    try {
-                        val captureRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-                        captureRequestBuilder.addTarget(surface)
-                        // Add any other capture settings (e.g., JPEG orientation)
-                        // captureRequestBuilder.set(CaptureRequest.JPEG_ORIENTATION, 90) // Example
+        val device = cameraDevice
+        val session = cameraCaptureSession
+        val surface = imageReader?.surface
+        if (device == null || session == null || surface == null) {
+            Log.e("Camera", "Cannot take picture: device/session/surface is null")
+            return
+        }
+        try {
+            val captureRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            captureRequestBuilder.addTarget(surface)
+            captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            captureRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+            // Optionally set JPEG orientation here if needed
 
-                        session.capture(captureRequestBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
-                            override fun onCaptureCompleted(
-                                session: CameraCaptureSession,
-                                request: CaptureRequest,
-                                result: TotalCaptureResult
-                            ) {
-                                super.onCaptureCompleted(session, request, result)
-                                Log.d("Camera", "Picture capture completed.")
-                                // Image will be available in ImageReader.OnImageAvailableListener
-                            }
+            session.capture(captureRequestBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    super.onCaptureCompleted(session, request, result)
+                    Log.d("Camera", "Picture capture completed.")
+                }
 
-                            override fun onCaptureFailed(
-                                session: CameraCaptureSession,
-                                request: CaptureRequest,
-                                failure: CaptureFailure
-                            ) {
-                                super.onCaptureFailed(session, request, failure)
-                                Log.e("Camera", "Picture capture failed: ${failure.reason}")
-                            }
-                        }, null) // Handler can be null or a background handler
-                    } catch (e: CameraAccessException) {
-                        Log.e("Camera", "Failed to take picture", e)
-                    }
-                } ?: Log.e("Camera", "ImageReader surface is null for takePicture")
-            } ?: Log.e("Camera", "CameraCaptureSession is null for takePicture")
-        } ?: Log.e("Camera", "CameraDevice is null for takePicture")
+                override fun onCaptureFailed(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    failure: CaptureFailure
+                ) {
+                    super.onCaptureFailed(session, request, failure)
+                    Log.e("Camera", "Picture capture failed: ${failure.reason}")
+                }
+            }, null)
+        } catch (e: CameraAccessException) {
+            Log.e("Camera", "Failed to take picture", e)
+        }
     }
 
     private fun saveImageToGallery(imageBytes: ByteArray) {
@@ -250,21 +259,18 @@ class MainActivity : AppCompatActivity() {
             put(MediaStore.Images.Media.TITLE, "Interval Shot")
             put(MediaStore.Images.Media.DISPLAY_NAME, "interval_shot_${System.currentTimeMillis()}.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            // For API 29+ (Android 10+), you might need to use MediaStore.Images.Media.IS_PENDING
-            // and then update it after the stream is closed.
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
         }
 
         val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-
         uri?.let {
             try {
                 contentResolver.openOutputStream(it)?.use { outputStream ->
                     outputStream.write(imageBytes)
                 }
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     values.clear()
                     values.put(MediaStore.Images.Media.IS_PENDING, 0)
                     contentResolver.update(it, values, null, null)
@@ -272,25 +278,20 @@ class MainActivity : AppCompatActivity() {
                 Log.d("Picture", "Picture saved to: $it")
             } catch (e: Exception) {
                 Log.e("Picture", "Failed to save picture", e)
-                // If saving failed, you might want to delete the MediaStore entry
                 contentResolver.delete(it, null, null)
             }
         } ?: Log.e("Picture", "Failed to create MediaStore entry.")
     }
 
-
     override fun onPause() {
         super.onPause()
-        closeCamera() // Close camera resources
-        cameraExecutor.shutdown() // Shutdown the executor
+        closeCamera()
+        cameraExecutor.shutdown()
     }
 
     override fun onResume() {
         super.onResume()
-        // Re-initialize camera if needed, or ensure it's started when user clicks the button
-        // For simplicity, we are starting the camera when the button is clicked if permissions are granted.
     }
-
 
     private fun closeCamera() {
         cameraCaptureSession?.close()
