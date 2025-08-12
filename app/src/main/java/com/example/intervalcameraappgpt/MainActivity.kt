@@ -1,6 +1,6 @@
-package com.example.intervalcameraapp
+package com.example.intervalcameraappgpt
 
-import com.example.intervalcameraappgpt.R // Assuming this is the correct R file
+import com.example.intervalcameraappgpt.R
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -21,6 +21,7 @@ import android.hardware.camera2.*
 import android.media.ImageReader
 import android.os.Build
 import android.util.Log
+import android.util.Size
 import androidx.annotation.RequiresApi
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -35,17 +36,27 @@ class MainActivity : AppCompatActivity() {
     private var cameraDevice: CameraDevice? = null // Keep a reference to the CameraDevice
     private var imageReader: ImageReader? = null
     private var cameraCaptureSession: CameraCaptureSession? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var intervalCaptureRunnable: Runnable? = null
 
 
     @SuppressLint("NewApi")
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-            if (permissions[Manifest.permission.CAMERA] == true &&
-                permissions[Manifest.permission.WRITE_EXTERNAL_STORAGE] == true) {
-                // 权限申请通过
+            val cameraGranted = permissions[Manifest.permission.CAMERA] == true
+            val storageGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Android 13+: Use READ_MEDIA_IMAGES, no WRITE permission needed for MediaStore
+                permissions[Manifest.permission.READ_MEDIA_IMAGES] == true
+            } else {
+                // Android 12 and below: Use traditional storage permissions
+                permissions[Manifest.permission.WRITE_EXTERNAL_STORAGE] == true
+            }
+            
+            if (cameraGranted && storageGranted) {
+                // Permissions granted
                 startCamera()
             } else {
-                // 权限未通过
+                // Permissions denied
                 Log.e("Permissions", "Camera or storage permission denied")
             }
         }
@@ -68,13 +79,46 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
 
-            val intervalTime = intervalTimeText.toInt()
-            val numShots = numShotsText.toInt()
+            val intervalTime: Int
+            val numShots: Int
+            
+            try {
+                intervalTime = intervalTimeText.toInt()
+                numShots = numShotsText.toInt()
+                
+                // Validate ranges to prevent crashes or unreasonable values
+                if (intervalTime <= 0 || intervalTime > 3600) {
+                    Log.e("InputValidation", "Interval time must be between 1 and 3600 seconds.")
+                    return@setOnClickListener
+                }
+                
+                if (numShots <= 0 || numShots > 1000) {
+                    Log.e("InputValidation", "Number of shots must be between 1 and 1000.")
+                    return@setOnClickListener
+                }
+            } catch (e: NumberFormatException) {
+                Log.e("InputValidation", "Please enter valid numbers for interval time and number of shots.", e)
+                return@setOnClickListener
+            }
 
 
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
-                || ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.WRITE_EXTERNAL_STORAGE))
+            val cameraPermissionGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+            val storagePermissionGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Android 13+: Check READ_MEDIA_IMAGES permission
+                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+            } else {
+                // Android 12 and below: Check WRITE_EXTERNAL_STORAGE permission
+                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+            }
+            
+            if (!cameraPermissionGranted || !storagePermissionGranted) {
+                val permissionsToRequest = mutableListOf(Manifest.permission.CAMERA)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    permissionsToRequest.add(Manifest.permission.READ_MEDIA_IMAGES)
+                } else {
+                    permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                }
+                requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
             } else {
                 startIntervalCapture(intervalTime, numShots)
             }
@@ -90,18 +134,40 @@ class MainActivity : AppCompatActivity() {
             ) != PackageManager.PERMISSION_GRANTED
         ) {
             Log.e("Camera", "Camera permission not granted, requesting permissions.")
-            requestPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.WRITE_EXTERNAL_STORAGE))
+            val permissionsToRequest = mutableListOf(Manifest.permission.CAMERA)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                permissionsToRequest.add(Manifest.permission.READ_MEDIA_IMAGES)
+            } else {
+                permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+            requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
             return
         }
 
         try {
-            val cameraId = cameraManager.cameraIdList.firstOrNull()
-            if (cameraId == null) {
-                Log.e("Camera", "No camera available.")
+            val cameraIdList = cameraManager.cameraIdList
+            if (cameraIdList.isEmpty()) {
+                Log.e("Camera", "No camera available on this device.")
                 return
             }
+            
+            // Find the best rear camera (Samsung devices may have multiple cameras)
+            val cameraId = findBestRearCamera(cameraManager, cameraIdList)
+            if (cameraId == null) {
+                Log.e("Camera", "No suitable rear camera found.")
+                return
+            }
+            
+            // Get camera characteristics to determine supported sizes
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val outputSizes = map?.getOutputSizes(android.graphics.ImageFormat.JPEG)
+            
+            // Use a more compatible resolution (many Samsung devices prefer 16:9 or 4:3)
+            val selectedSize = selectBestImageSize(outputSizes)
+            Log.d("Camera", "Selected image size: ${selectedSize.width}x${selectedSize.height}")
 
-            imageReader = ImageReader.newInstance(1920, 1080, android.graphics.ImageFormat.JPEG, 1).apply {
+            imageReader = ImageReader.newInstance(selectedSize.width, selectedSize.height, android.graphics.ImageFormat.JPEG, 1).apply {
                 setOnImageAvailableListener({ reader ->
                     // This is where you get the image after it's captured
                     val image = reader.acquireLatestImage()
@@ -113,27 +179,45 @@ class MainActivity : AppCompatActivity() {
                         saveImageToGallery(bytes) // Call a function to save the image data
                         it.close()
                     }
-                }, Handler(Looper.getMainLooper())) // Ensure handler is on the correct looper if needed for UI updates
+                }, mainHandler) // Use the reusable main handler
             }
 
 
-            cameraManager.openCamera(cameraId, cameraExecutor, object : CameraDevice.StateCallback() {
+            cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {
+                    Log.d("Camera", "Camera opened successfully")
                     cameraDevice = device // Store the cameraDevice instance
                     createCameraPreviewSession()
                 }
 
                 override fun onDisconnected(device: CameraDevice) {
+                    Log.w("Camera", "Camera disconnected")
                     device.close()
                     cameraDevice = null
                 }
 
                 override fun onError(device: CameraDevice, error: Int) {
-                    Log.e("Camera", "Camera error: $error")
+                    val errorMessage = when (error) {
+                        CameraDevice.StateCallback.ERROR_CAMERA_IN_USE -> "Camera is already in use"
+                        CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE -> "Maximum number of cameras in use"
+                        CameraDevice.StateCallback.ERROR_CAMERA_DISABLED -> "Camera is disabled (check device policy)"
+                        CameraDevice.StateCallback.ERROR_CAMERA_DEVICE -> "Camera device has encountered a fatal error"
+                        CameraDevice.StateCallback.ERROR_CAMERA_SERVICE -> "Camera service has encountered a fatal error"
+                        else -> "Unknown camera error: $error"
+                    }
+                    Log.e("Camera", "Camera error: $errorMessage")
                     device.close()
                     cameraDevice = null
+                    
+                                         // For Samsung devices, sometimes we need to retry with a different camera
+                     if (error == CameraDevice.StateCallback.ERROR_CAMERA_IN_USE) {
+                         mainHandler.postDelayed({
+                             Log.d("Camera", "Retrying camera initialization...")
+                             // Could implement retry logic here
+                         }, 1000)
+                     }
                 }
-            })
+                            }, mainHandler)
         } catch (e: CameraAccessException) {
             Log.e("Camera", "Failed to access camera", e)
         }
@@ -175,7 +259,7 @@ class MainActivity : AppCompatActivity() {
             // You might want to re-initialize the camera here or show an error
             startCamera() // Attempt to start the camera if not ready
             // Add a delay or a callback mechanism to ensure camera is ready before proceeding
-            Handler(Looper.getMainLooper()).postDelayed({
+            mainHandler.postDelayed({
                 // Retry after a short delay, or implement a more robust state check
                 if (cameraDevice != null && cameraCaptureSession != null) {
                     proceedWithIntervalCapture(intervalTime, numShots)
@@ -189,22 +273,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun proceedWithIntervalCapture(intervalTime: Int, numShots: Int) {
-        val handler = Handler(Looper.getMainLooper()) // Use Looper.getMainLooper() or a background looper if preferred
+        // Cancel any existing interval capture
+        stopIntervalCapture()
 
-        val runnable = object : Runnable {
+        intervalCaptureRunnable = object : Runnable {
             var shotsTaken = 0
 
             override fun run() {
-                if (shotsTaken < numShots) {
+                if (shotsTaken < numShots && !isFinishing && !isDestroyed) {
                     takePicture() // Modified to just trigger capture
                     shotsTaken++
                     if (shotsTaken < numShots) { // Schedule next shot only if more are needed
-                        handler.postDelayed(this, (intervalTime * 1000).toLong())
+                        mainHandler.postDelayed(this, (intervalTime * 1000).toLong())
+                    } else {
+                        // All shots completed, cleanup
+                        intervalCaptureRunnable = null
+                        Log.d("IntervalCapture", "All $numShots shots completed")
                     }
+                } else {
+                    // Capture stopped or activity is finishing
+                    intervalCaptureRunnable = null
                 }
             }
         }
-        handler.post(runnable) // Start the first capture
+        intervalCaptureRunnable?.let { mainHandler.post(it) } // Start the first capture
+    }
+    
+    private fun stopIntervalCapture() {
+        intervalCaptureRunnable?.let { runnable ->
+            mainHandler.removeCallbacks(runnable)
+            intervalCaptureRunnable = null
+            Log.d("IntervalCapture", "Interval capture stopped")
+        }
     }
 
     private fun takePicture() {
@@ -281,8 +381,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        stopIntervalCapture() // Stop any ongoing interval capture
         closeCamera() // Close camera resources
-        cameraExecutor.shutdown() // Shutdown the executor
     }
 
     override fun onResume() {
@@ -293,12 +393,94 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun closeCamera() {
-        cameraCaptureSession?.close()
-        cameraCaptureSession = null
-        cameraDevice?.close()
-        cameraDevice = null
-        imageReader?.close()
-        imageReader = null
-        Log.d("Camera", "Camera resources closed.")
+        try {
+            cameraCaptureSession?.close()
+            cameraCaptureSession = null
+            cameraDevice?.close()
+            cameraDevice = null
+            imageReader?.close()
+            imageReader = null
+            Log.d("Camera", "Camera resources closed.")
+        } catch (e: Exception) {
+            Log.e("Camera", "Error closing camera resources", e)
+        }
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        stopIntervalCapture() // Stop any ongoing interval capture
+        closeCamera() // Close camera resources
+        mainHandler.removeCallbacksAndMessages(null) // Remove all pending callbacks
+        cameraExecutor.shutdown() // Shutdown the executor
+    }
+    
+    /**
+     * Find the best rear camera on Samsung devices
+     */
+    private fun findBestRearCamera(cameraManager: CameraManager, cameraIdList: Array<String>): String? {
+        try {
+            for (cameraId in cameraIdList) {
+                val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+                val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                
+                // Look for rear camera
+                if (facing == CameraCharacteristics.LENS_FACING_BACK) {
+                    Log.d("Camera", "Found rear camera: $cameraId")
+                    return cameraId
+                }
+            }
+        } catch (e: CameraAccessException) {
+            Log.e("Camera", "Failed to access camera characteristics", e)
+        }
+        
+        // Fallback to first camera if no rear camera found
+        return cameraIdList.firstOrNull()
+    }
+    
+    /**
+     * Select the best image size for Samsung devices
+     */
+    private fun selectBestImageSize(sizes: Array<Size>?): Size {
+        if (sizes == null || sizes.isEmpty()) {
+            Log.w("Camera", "No sizes available, using default 1920x1080")
+            return Size(1920, 1080)
+        }
+        
+        // Sort sizes by pixel count (area) in descending order
+        val sortedSizes = sizes.sortedByDescending { it.width * it.height }
+        
+        // Prefer sizes with common aspect ratios that work well on Samsung devices
+        val preferredAspectRatios = listOf(
+            16.0/9.0,  // 16:9 (most common)
+            4.0/3.0,   // 4:3 (traditional)
+            3.0/2.0    // 3:2
+        )
+        
+        for (aspectRatio in preferredAspectRatios) {
+            for (size in sortedSizes) {
+                val sizeAspectRatio = size.width.toDouble() / size.height.toDouble()
+                if (Math.abs(sizeAspectRatio - aspectRatio) < 0.1) {
+                    // Found a good size with preferred aspect ratio
+                    if (size.width <= 4000 && size.height <= 3000) {
+                        // Reasonable size limit to avoid memory issues
+                        Log.d("Camera", "Selected size: ${size.width}x${size.height} (aspect ratio: $sizeAspectRatio)")
+                        return size
+                    }
+                }
+            }
+        }
+        
+        // Fallback: use the largest available size under reasonable limits
+        for (size in sortedSizes) {
+            if (size.width <= 4000 && size.height <= 3000) {
+                Log.d("Camera", "Fallback to size: ${size.width}x${size.height}")
+                return size
+            }
+        }
+        
+        // Last resort: use the smallest available size
+        val fallbackSize = sortedSizes.last()
+        Log.w("Camera", "Using smallest available size: ${fallbackSize.width}x${fallbackSize.height}")
+        return fallbackSize
     }
 }
