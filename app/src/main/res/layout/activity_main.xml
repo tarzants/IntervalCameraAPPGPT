@@ -23,5 +23,15 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_below="@id/numShotsEditText"
+        android:layout_marginTop="5dp"
         android:text="开始拍摄" />
+
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+
+    tools:context=".MainActivity">
+
+
+    <!-- You can add other UI elements on top of or around the PreviewView -->
+
 </RelativeLayout>

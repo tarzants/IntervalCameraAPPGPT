@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Base application theme. -->
+    <style name="AppTheme" parent="Theme.AppCompat.Light.DarkActionBar"> <!-- Correct: Inherits from AppCompat -->
+        <!-- Customize your theme here. -->
+        <item name="colorPrimary">@color/my_light_primary</item>
+    </style>
 
-    <style name="Theme.IntervalCameraAPPGPT" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Or if you want no ActionBar -->
+    <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.NoActionBar">
+        <item name="colorPrimary">@color/my_light_primary</item>
+    </style>
 </resources>

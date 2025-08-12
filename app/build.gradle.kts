@@ -64,4 +64,11 @@ dependencies {
 
     val lifecycle_version = "2.8.6"
     implementation("androidx.lifecycle:lifecycle-livedata-ktx:$lifecycle_version")
+
+    val cameraxVersion = "1.3.0" // Use the latest stable version
+    implementation("androidx.camera:camera-core:${cameraxVersion}")
+    implementation("androidx.camera:camera-camera2:${cameraxVersion}")
+    implementation("androidx.camera:camera-lifecycle:${cameraxVersion}")
+    implementation("androidx.camera:camera-view:${cameraxVersion}") // For PreviewView
+    implementation("androidx.camera:camera-extensions:${cameraxVersion}")
 }
