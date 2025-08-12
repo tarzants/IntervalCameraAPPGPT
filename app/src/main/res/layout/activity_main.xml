@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <EditText
+        android:id="@+id/intervalTimeEditText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:hint="间隔时间 (秒)"
+        android:inputType="number" />
+
+    <EditText
+        android:id="@+id/numShotsEditText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/intervalTimeEditText"
+        android:hint="拍摄张数"
+        android:inputType="number" />
+
+    <Button
+        android:id="@+id/startButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/numShotsEditText"
+        android:text="开始拍摄" />
+</RelativeLayout>
