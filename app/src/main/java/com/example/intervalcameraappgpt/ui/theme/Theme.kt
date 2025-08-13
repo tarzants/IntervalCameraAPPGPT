@@ -1,3 +1,4 @@
+// Author: SamT
 package com.example.intervalcameraappgpt.ui.theme
 
 import android.app.Activity

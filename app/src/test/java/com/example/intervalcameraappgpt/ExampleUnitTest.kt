@@ -1,3 +1,4 @@
+// Author: SamT
 package com.example.intervalcameraappgpt
 
 import org.junit.Test

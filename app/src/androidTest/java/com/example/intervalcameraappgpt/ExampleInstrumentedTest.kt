@@ -1,3 +1,4 @@
+// Author: SamT
 package com.example.intervalcameraappgpt
 
 import androidx.test.platform.app.InstrumentationRegistry
